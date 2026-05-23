@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
 
 type TransactionType = 'income' | 'expense' | 'transfer'
-type View = 'transactions' | 'accounts' | 'overview'
-type PickerField = 'account' | 'from' | 'to' | null
+type View = 'transactions' | 'accounts'
+type EditorMode = 'create' | 'edit'
+type AccountTarget = 'account' | 'from' | 'to'
 
 type Account = {
   id: string
@@ -35,12 +36,19 @@ type Draft = {
   description: string
 }
 
+type AccountDraft = {
+  id: string | null
+  name: string
+  openingBalance: string
+  mode: EditorMode
+}
+
 type StoredData = {
   accounts: Account[]
   transactions: Transaction[]
 }
 
-const STORAGE_KEY = 'money-manager-lite-v1'
+const STORAGE_KEY = 'money-manager-lite-v2'
 
 const seededAccounts: Account[] = [
   { id: crypto.randomUUID(), name: 'ICICI Bank', openingBalance: 178462.7 },
@@ -90,6 +98,16 @@ const seededTransactions: Transaction[] = [
   {
     id: crypto.randomUUID(),
     type: 'expense',
+    amount: 150,
+    category: 'Food',
+    note: 'Food outside tea',
+    description: 'Tea',
+    createdAt: new Date(now.getFullYear(), now.getMonth(), 23, 11, 42).toISOString(),
+    accountId: seededAccounts[0].id,
+  },
+  {
+    id: crypto.randomUUID(),
+    type: 'expense',
     amount: 1711.58,
     category: 'Home',
     note: 'Sleepwell',
@@ -100,11 +118,31 @@ const seededTransactions: Transaction[] = [
   {
     id: crypto.randomUUID(),
     type: 'income',
+    amount: 1514.77,
+    category: 'Sales',
+    note: 'Sold excel course',
+    description: 'Digital sale',
+    createdAt: new Date(now.getFullYear(), now.getMonth(), 23, 8, 16).toISOString(),
+    accountId: seededAccounts[0].id,
+  },
+  {
+    id: crypto.randomUUID(),
+    type: 'income',
     amount: 1131.64,
     category: 'Sales',
     note: 'Sold excel course',
     description: 'Digital sale',
     createdAt: new Date(now.getFullYear(), now.getMonth(), 21, 11, 4).toISOString(),
+    accountId: seededAccounts[0].id,
+  },
+  {
+    id: crypto.randomUUID(),
+    type: 'expense',
+    amount: 210,
+    category: 'Travel',
+    note: 'FTH',
+    description: 'Local commute',
+    createdAt: new Date(now.getFullYear(), now.getMonth(), 21, 9, 4).toISOString(),
     accountId: seededAccounts[0].id,
   },
   {
@@ -136,6 +174,13 @@ const emptyDraft: Draft = {
   description: '',
 }
 
+const emptyAccountDraft: AccountDraft = {
+  id: null,
+  name: '',
+  openingBalance: '',
+  mode: 'create',
+}
+
 function formatCurrency(value: number) {
   return new Intl.NumberFormat('en-IN', {
     style: 'currency',
@@ -159,13 +204,13 @@ function formatDateTime(iso: string) {
   return { dateText, timeText }
 }
 
-function formatDayHeading(iso: string) {
+function formatDaySummary(iso: string) {
   const date = new Date(iso)
-  return new Intl.DateTimeFormat('en-IN', {
-    day: '2-digit',
-    month: 'short',
-    weekday: 'short',
-  }).format(date)
+  return {
+    day: new Intl.DateTimeFormat('en-GB', { day: '2-digit' }).format(date),
+    weekday: new Intl.DateTimeFormat('en-IN', { weekday: 'short' }).format(date),
+    monthYear: new Intl.DateTimeFormat('en-IN', { month: '2-digit', year: 'numeric' }).format(date),
+  }
 }
 
 function isSameMonth(date: Date, basis: Date) {
@@ -187,15 +232,77 @@ function App() {
   })
   const [activeView, setActiveView] = useState<View>('transactions')
   const [draft, setDraft] = useState<Draft>(emptyDraft)
-  const [showComposer, setShowComposer] = useState(false)
-  const [pickerField, setPickerField] = useState<PickerField>(null)
-  const [showAccountForm, setShowAccountForm] = useState(false)
-  const [newAccountName, setNewAccountName] = useState('')
-  const [newOpeningBalance, setNewOpeningBalance] = useState('')
+  const [composerOpen, setComposerOpen] = useState(false)
+  const [accountEditorOpen, setAccountEditorOpen] = useState(false)
+  const [accountDraft, setAccountDraft] = useState<AccountDraft>(emptyAccountDraft)
+  const [accountTarget, setAccountTarget] = useState<AccountTarget>('account')
+  const overlayDepth = useRef(0)
 
   useEffect(() => {
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(data))
   }, [data])
+
+  useEffect(() => {
+    const onPopState = () => {
+      if (accountEditorOpen) {
+        setAccountEditorOpen(false)
+        setAccountDraft(emptyAccountDraft)
+        overlayDepth.current = Math.max(0, overlayDepth.current - 1)
+        return
+      }
+      if (composerOpen) {
+        setComposerOpen(false)
+        setDraft(emptyDraft)
+        overlayDepth.current = Math.max(0, overlayDepth.current - 1)
+      }
+    }
+
+    window.addEventListener('popstate', onPopState)
+    return () => window.removeEventListener('popstate', onPopState)
+  }, [accountEditorOpen, composerOpen])
+
+  const pushOverlayHistory = () => {
+    window.history.pushState({ overlay: true, depth: overlayDepth.current + 1 }, '')
+    overlayDepth.current += 1
+  }
+
+  const closeComposer = () => {
+    if (composerOpen) {
+      window.history.back()
+    }
+  }
+
+  const closeAccountEditor = () => {
+    if (accountEditorOpen) {
+      window.history.back()
+    }
+  }
+
+  const openComposer = (type: TransactionType = 'expense') => {
+    setDraft({
+      ...emptyDraft,
+      type,
+      category: type === 'transfer' ? 'Transfer' : '',
+    })
+    setAccountTarget(type === 'transfer' ? 'from' : 'account')
+    setComposerOpen(true)
+    pushOverlayHistory()
+  }
+
+  const openAccountEditor = (account?: Account) => {
+    if (account) {
+      setAccountDraft({
+        id: account.id,
+        name: account.name,
+        openingBalance: account.openingBalance.toString(),
+        mode: 'edit',
+      })
+    } else {
+      setAccountDraft(emptyAccountDraft)
+    }
+    setAccountEditorOpen(true)
+    pushOverlayHistory()
+  }
 
   const accountsById = useMemo(
     () =>
@@ -215,11 +322,9 @@ function App() {
     for (const tx of data.transactions) {
       if (tx.type === 'income' && tx.accountId) {
         balances[tx.accountId] = (balances[tx.accountId] ?? 0) + tx.amount
-      }
-      if (tx.type === 'expense' && tx.accountId) {
+      } else if (tx.type === 'expense' && tx.accountId) {
         balances[tx.accountId] = (balances[tx.accountId] ?? 0) - tx.amount
-      }
-      if (tx.type === 'transfer' && tx.fromAccountId && tx.toAccountId) {
+      } else if (tx.type === 'transfer' && tx.fromAccountId && tx.toAccountId) {
         balances[tx.fromAccountId] = (balances[tx.fromAccountId] ?? 0) - tx.amount
         balances[tx.toAccountId] = (balances[tx.toAccountId] ?? 0) + tx.amount
       }
@@ -245,11 +350,6 @@ function App() {
     [data.transactions],
   )
 
-  const totalBalance = useMemo(
-    () => Object.values(accountBalances).reduce((sum, value) => sum + value, 0),
-    [accountBalances],
-  )
-
   const monthlySummary = useMemo(() => {
     const current = new Date()
     return sortedTransactions.reduce(
@@ -259,8 +359,7 @@ function App() {
         }
         if (transaction.type === 'income') {
           summary.income += transaction.amount
-        }
-        if (transaction.type === 'expense') {
+        } else if (transaction.type === 'expense') {
           summary.expense += transaction.amount
         }
         return summary
@@ -273,7 +372,7 @@ function App() {
     return sortedTransactions.reduce<
       Array<{
         key: string
-        heading: string
+        summary: ReturnType<typeof formatDaySummary>
         income: number
         expense: number
         items: Transaction[]
@@ -286,7 +385,7 @@ function App() {
       if (!existing) {
         groups.push({
           key,
-          heading: formatDayHeading(transaction.createdAt),
+          summary: formatDaySummary(transaction.createdAt),
           income: transaction.type === 'income' ? transaction.amount : 0,
           expense: transaction.type === 'expense' ? transaction.amount : 0,
           items: [transaction],
@@ -297,74 +396,43 @@ function App() {
       existing.items.push(transaction)
       if (transaction.type === 'income') {
         existing.income += transaction.amount
-      }
-      if (transaction.type === 'expense') {
+      } else if (transaction.type === 'expense') {
         existing.expense += transaction.amount
       }
       return groups
     }, [])
   }, [sortedTransactions])
 
-  const pickerTitle =
-    pickerField === 'account'
-      ? 'Select account'
-      : pickerField === 'from'
-        ? 'Select from account'
-        : pickerField === 'to'
-          ? 'Select to account'
-          : ''
-
-  const transactionMoment = formatDateTime(new Date().toISOString())
-
-  const resetComposer = () => {
-    setDraft(emptyDraft)
-    setPickerField(null)
-    setShowComposer(false)
-  }
+  const currentMoment = formatDateTime(new Date().toISOString())
 
   const updateDraft = <K extends keyof Draft>(key: K, value: Draft[K]) => {
     setDraft((current) => ({ ...current, [key]: value }))
   }
 
-  const selectAccount = (accountId: string) => {
-    if (pickerField === 'account') {
-      updateDraft('accountId', accountId)
-    }
-    if (pickerField === 'from') {
-      updateDraft('fromAccountId', accountId)
-      if (draft.toAccountId === accountId) {
-        updateDraft('toAccountId', '')
-      }
-    }
-    if (pickerField === 'to') {
-      updateDraft('toAccountId', accountId)
-      if (draft.fromAccountId === accountId) {
-        updateDraft('fromAccountId', '')
-      }
-    }
-    setPickerField(null)
+  const updateAccountDraft = <K extends keyof AccountDraft>(key: K, value: AccountDraft[K]) => {
+    setAccountDraft((current) => ({ ...current, [key]: value }))
   }
 
-  const saveAccount = () => {
-    const name = newAccountName.trim()
-    if (!name) {
+  const applyAccountSelection = (accountId: string) => {
+    if (draft.type === 'transfer') {
+      if (accountTarget === 'from') {
+        setDraft((current) => ({
+          ...current,
+          fromAccountId: accountId,
+          toAccountId: current.toAccountId === accountId ? '' : current.toAccountId,
+        }))
+        setAccountTarget('to')
+      } else {
+        setDraft((current) => ({
+          ...current,
+          toAccountId: accountId,
+          fromAccountId: current.fromAccountId === accountId ? '' : current.fromAccountId,
+        }))
+      }
       return
     }
 
-    setData((current) => ({
-      ...current,
-      accounts: [
-        ...current.accounts,
-        {
-          id: crypto.randomUUID(),
-          name,
-          openingBalance: Number.parseFloat(newOpeningBalance || '0') || 0,
-        },
-      ],
-    }))
-    setNewAccountName('')
-    setNewOpeningBalance('')
-    setShowAccountForm(false)
+    updateDraft('accountId', accountId)
   }
 
   const saveTransaction = () => {
@@ -381,7 +449,7 @@ function App() {
       return
     }
 
-    const nextTransaction: Transaction = {
+    const transaction: Transaction = {
       id: crypto.randomUUID(),
       type: draft.type,
       amount,
@@ -396,280 +464,275 @@ function App() {
 
     setData((current) => ({
       ...current,
-      transactions: [nextTransaction, ...current.transactions],
+      transactions: [transaction, ...current.transactions],
     }))
+    closeComposer()
     setActiveView('transactions')
-    resetComposer()
   }
 
-  const renderTransactionAccountLine = (transaction: Transaction) => {
+  const saveAccount = () => {
+    const name = accountDraft.name.trim()
+    if (!name) {
+      return
+    }
+
+    const openingBalance = Number.parseFloat(accountDraft.openingBalance || '0') || 0
+
+    setData((current) => {
+      if (accountDraft.mode === 'edit' && accountDraft.id) {
+        return {
+          ...current,
+          accounts: current.accounts.map((account) =>
+            account.id === accountDraft.id ? { ...account, name, openingBalance } : account,
+          ),
+        }
+      }
+
+      return {
+        ...current,
+        accounts: [...current.accounts, { id: crypto.randomUUID(), name, openingBalance }],
+      }
+    })
+
+    closeAccountEditor()
+  }
+
+  const deleteAccount = () => {
+    if (!accountDraft.id) {
+      return
+    }
+
+    setData((current) => ({
+      ...current,
+      accounts: current.accounts.filter((account) => account.id !== accountDraft.id),
+      transactions: current.transactions.filter(
+        (transaction) =>
+          transaction.accountId !== accountDraft.id &&
+          transaction.fromAccountId !== accountDraft.id &&
+          transaction.toAccountId !== accountDraft.id,
+      ),
+    }))
+
+    closeAccountEditor()
+  }
+
+  const renderAccountLine = (transaction: Transaction) => {
     if (transaction.type === 'transfer') {
-      const from = accountsById[transaction.fromAccountId ?? '']?.name ?? 'Unknown'
-      const to = accountsById[transaction.toAccountId ?? '']?.name ?? 'Unknown'
-      return `${from} -> ${to}`
+      const fromName = accountsById[transaction.fromAccountId ?? '']?.name ?? 'Unknown'
+      const toName = accountsById[transaction.toAccountId ?? '']?.name ?? 'Unknown'
+      return `${fromName} -> ${toName}`
     }
 
     return accountsById[transaction.accountId ?? '']?.name ?? 'Unknown'
   }
 
+  const screenTitle = activeView === 'transactions' ? 'May 2026' : 'Accounts'
+
   return (
     <div className="app-shell">
       <div className="phone-frame">
         <header className="topbar">
-          <div>
-            <p className="eyebrow">Money Manager</p>
-            <h1>{activeView === 'transactions' ? 'Transactions' : activeView === 'accounts' ? 'Accounts' : 'Overview'}</h1>
+          <div className="title-stack">
+            <h1>{screenTitle}</h1>
           </div>
-          <button
-            type="button"
-            className="ghost-button"
-            onClick={() => {
-              setShowComposer(true)
-              setActiveView('transactions')
-            }}
-          >
-            Add
-          </button>
+          {activeView === 'accounts' ? (
+            <button type="button" className="icon-button" onClick={() => openAccountEditor()}>
+              +
+            </button>
+          ) : (
+            <button type="button" className="icon-button star-button">
+              ☆
+            </button>
+          )}
         </header>
 
         <main className="app-content">
-          {activeView === 'overview' && (
-            <section className="overview-view">
-              <div className="hero-card">
+          {activeView === 'transactions' && (
+            <section className="transactions-screen">
+              <div className="summary-band">
                 <div>
-                  <p className="muted-label">Current balance</p>
-                  <h2>{formatCurrency(totalBalance)}</h2>
-                </div>
-                <p className="subtle-copy">Minimal tracking for your day-to-day money flow.</p>
-              </div>
-              <div className="summary-grid">
-                <article className="metric-card">
                   <span>Income</span>
                   <strong className="income-text">{formatCurrency(monthlySummary.income)}</strong>
-                </article>
-                <article className="metric-card">
-                  <span>Expense</span>
-                  <strong className="expense-text">{formatCurrency(monthlySummary.expense)}</strong>
-                </article>
-                <article className="metric-card">
-                  <span>Net</span>
-                  <strong>{formatCurrency(monthlySummary.income - monthlySummary.expense)}</strong>
-                </article>
-              </div>
-              <div className="overview-list">
-                <h3>Recent notes</h3>
-                <div className="chip-row">
-                  {noteSuggestions.slice(0, 8).map((note) => (
-                    <span className="note-chip" key={note}>
-                      {note}
-                    </span>
-                  ))}
                 </div>
-              </div>
-            </section>
-          )}
-
-          {activeView === 'transactions' && (
-            <section className="transactions-view">
-              <div className="month-strip">
                 <div>
-                  <p className="muted-label">This month</p>
-                  <strong>{new Intl.DateTimeFormat('en-IN', { month: 'long', year: 'numeric' }).format(new Date())}</strong>
+                  <span>Expenses</span>
+                  <strong className="expense-text">{formatCurrency(monthlySummary.expense)}</strong>
                 </div>
-                <div className="month-totals">
-                  <span className="income-text">{formatCurrency(monthlySummary.income)}</span>
-                  <span className="expense-text">{formatCurrency(monthlySummary.expense)}</span>
+                <div>
+                  <span>Total</span>
+                  <strong>{formatCurrency(monthlySummary.income - monthlySummary.expense)}</strong>
                 </div>
               </div>
 
-              <div className="transaction-groups">
+              <div className="transaction-feed">
                 {groupedTransactions.map((group) => (
-                  <section className="day-card" key={group.key}>
-                    <header className="day-header">
-                      <div>
-                        <strong>{group.heading}</strong>
+                  <section className="day-section" key={group.key}>
+                    <header className="day-banner">
+                      <div className="day-stamp">
+                        <strong>{group.summary.day}</strong>
+                        <span>{group.summary.weekday}</span>
+                        <small>{group.summary.monthYear}</small>
                       </div>
-                      <div className="day-totals">
+                      <div className="day-metrics">
                         <span className="income-text">{formatCurrency(group.income)}</span>
                         <span className="expense-text">{formatCurrency(group.expense)}</span>
                       </div>
                     </header>
 
-                    {group.items.map((transaction) => (
-                      <article className="transaction-row" key={transaction.id}>
-                        <div className="transaction-meta">
-                          <span className="category-pill">{transaction.category}</span>
-                          <div>
-                            <h3>{transaction.note || transaction.description || transaction.category}</h3>
-                            <p>{renderTransactionAccountLine(transaction)}</p>
+                    <div className="day-items">
+                      {group.items.map((transaction) => (
+                        <article className="compact-transaction" key={transaction.id}>
+                          <div className="compact-left">
+                            <span className="compact-category">{transaction.category}</span>
+                            <div>
+                              <h3>{transaction.note || transaction.description || transaction.category}</h3>
+                              <p>{renderAccountLine(transaction)}</p>
+                            </div>
                           </div>
-                        </div>
-                        <strong className={transaction.type === 'expense' ? 'expense-text' : 'income-text'}>
-                          {transaction.type === 'expense' ? '-' : '+'}
-                          {formatCurrency(transaction.amount)}
-                        </strong>
-                      </article>
-                    ))}
+                          <strong className={transaction.type === 'expense' ? 'expense-text' : 'income-text'}>
+                            {transaction.type === 'expense' ? '-' : '+'}
+                            {formatCurrency(transaction.amount)}
+                          </strong>
+                        </article>
+                      ))}
+                    </div>
                   </section>
                 ))}
               </div>
+
+              <button type="button" className="fab secondary-fab">
+                ◎
+              </button>
+              <button type="button" className="fab primary-fab" onClick={() => openComposer('expense')}>
+                +
+              </button>
             </section>
           )}
 
           {activeView === 'accounts' && (
-            <section className="accounts-view">
-              <div className="summary-grid accounts-summary">
-                <article className="metric-card">
-                  <span>Assets</span>
-                  <strong className="income-text">{formatCurrency(totalBalance)}</strong>
-                </article>
-                <article className="metric-card">
-                  <span>Liabilities</span>
-                  <strong className="expense-text">{formatCurrency(0)}</strong>
-                </article>
-                <article className="metric-card">
-                  <span>Total</span>
-                  <strong>{formatCurrency(totalBalance)}</strong>
-                </article>
+            <section className="accounts-screen">
+              <div className="accounts-header-row">
+                <h2>Accounts</h2>
+                <button type="button" className="inline-action" onClick={() => openAccountEditor()}>
+                  Add account
+                </button>
               </div>
 
               <div className="accounts-list">
-                <div className="section-header">
-                  <h3>Accounts</h3>
-                  <button type="button" className="ghost-button" onClick={() => setShowAccountForm(true)}>
-                    New account
-                  </button>
-                </div>
-
                 {data.accounts.map((account) => (
-                  <article className="account-row" key={account.id}>
-                    <div>
-                      <h3>{account.name}</h3>
-                      <p>Opening {formatCurrency(account.openingBalance)}</p>
-                    </div>
+                  <button type="button" className="account-list-row" key={account.id} onClick={() => openAccountEditor(account)}>
+                    <span>{account.name}</span>
                     <strong>{formatCurrency(accountBalances[account.id] ?? account.openingBalance)}</strong>
-                  </article>
+                  </button>
                 ))}
               </div>
             </section>
           )}
         </main>
 
-        {activeView === 'transactions' && (
-          <button
-            type="button"
-            className="fab"
-            onClick={() => {
-              setShowComposer(true)
-              setDraft((current) => ({ ...current, type: 'expense' }))
-            }}
-          >
-            +
-          </button>
-        )}
-
-        <nav className="bottom-nav">
+        <nav className="bottom-nav two-up">
           <button
             type="button"
             className={activeView === 'transactions' ? 'nav-item active' : 'nav-item'}
             onClick={() => setActiveView('transactions')}
           >
-            <span>Trans.</span>
-          </button>
-          <button
-            type="button"
-            className={activeView === 'overview' ? 'nav-item active' : 'nav-item'}
-            onClick={() => setActiveView('overview')}
-          >
-            <span>Stats</span>
+            Trans.
           </button>
           <button
             type="button"
             className={activeView === 'accounts' ? 'nav-item active' : 'nav-item'}
             onClick={() => setActiveView('accounts')}
           >
-            <span>Accounts</span>
+            Accounts
           </button>
         </nav>
 
-        {showComposer && (
-          <div className="composer-backdrop" onClick={resetComposer}>
-            <section className="composer-sheet" onClick={(event) => event.stopPropagation()}>
-              <div className="sheet-handle" />
-              <header className="composer-header">
-                <div>
-                  <p className="eyebrow">New transaction</p>
-                  <h2>{draft.type[0].toUpperCase() + draft.type.slice(1)}</h2>
-                </div>
-                <button type="button" className="ghost-button" onClick={resetComposer}>
-                  Close
-                </button>
-              </header>
+        {composerOpen && (
+          <section className="overlay-screen">
+            <header className="overlay-header">
+              <button type="button" className="back-button" onClick={closeComposer}>
+                ←
+              </button>
+              <h2>{draft.type[0].toUpperCase() + draft.type.slice(1)}</h2>
+              <button type="button" className="icon-button star-button">
+                ☆
+              </button>
+            </header>
 
-              <div className="type-toggle">
+            <div className="overlay-body transaction-overlay">
+              <div className="type-toggle compact-toggle">
                 {(['income', 'expense', 'transfer'] as TransactionType[]).map((type) => (
                   <button
                     type="button"
                     key={type}
                     className={draft.type === type ? `toggle-chip ${type}` : 'toggle-chip'}
-                    onClick={() =>
-                      setDraft((current) => ({
-                        ...current,
+                    onClick={() => {
+                      setDraft({
+                        ...emptyDraft,
                         type,
-                        accountId: type === 'transfer' ? '' : current.accountId,
-                        fromAccountId: type === 'transfer' ? current.fromAccountId : '',
-                        toAccountId: type === 'transfer' ? current.toAccountId : '',
-                      }))
-                    }
+                        category: type === 'transfer' ? 'Transfer' : '',
+                      })
+                      setAccountTarget(type === 'transfer' ? 'from' : 'account')
+                    }}
                   >
                     {type}
                   </button>
                 ))}
               </div>
 
-              <div className="datetime-row">
-                <span>Date</span>
-                <strong>{transactionMoment.dateText}</strong>
-                <strong>{transactionMoment.timeText}</strong>
-              </div>
+              <div className="fields-panel">
+                <div className="datetime-line">
+                  <span>Date</span>
+                  <strong>{currentMoment.dateText}</strong>
+                  <strong>{currentMoment.timeText}</strong>
+                </div>
 
-              <div className="form-grid">
-                {draft.type !== 'transfer' && (
-                  <label className="field">
+                {draft.type === 'transfer' ? (
+                  <>
+                    <label className="compact-field">
+                      <span>From</span>
+                      <button
+                        type="button"
+                        className={accountTarget === 'from' ? 'line-picker active' : 'line-picker'}
+                        onClick={() => setAccountTarget('from')}
+                      >
+                        {accountsById[draft.fromAccountId]?.name ?? 'Choose account'}
+                      </button>
+                    </label>
+                    <label className="compact-field">
+                      <span>To</span>
+                      <button
+                        type="button"
+                        className={accountTarget === 'to' ? 'line-picker active' : 'line-picker'}
+                        onClick={() => setAccountTarget('to')}
+                      >
+                        {accountsById[draft.toAccountId]?.name ?? 'Choose account'}
+                      </button>
+                    </label>
+                  </>
+                ) : (
+                  <label className="compact-field">
                     <span>Account</span>
-                    <button type="button" className="picker-button" onClick={() => setPickerField('account')}>
+                    <button
+                      type="button"
+                      className={accountTarget === 'account' ? 'line-picker active' : 'line-picker'}
+                      onClick={() => setAccountTarget('account')}
+                    >
                       {accountsById[draft.accountId]?.name ?? 'Choose account'}
                     </button>
                   </label>
                 )}
 
-                {draft.type === 'transfer' && (
-                  <>
-                    <label className="field">
-                      <span>From</span>
-                      <button type="button" className="picker-button transfer" onClick={() => setPickerField('from')}>
-                        {accountsById[draft.fromAccountId]?.name ?? 'Choose source account'}
-                      </button>
-                    </label>
-                    <label className="field">
-                      <span>To</span>
-                      <button type="button" className="picker-button transfer" onClick={() => setPickerField('to')}>
-                        {accountsById[draft.toAccountId]?.name ?? 'Choose destination account'}
-                      </button>
-                    </label>
-                  </>
-                )}
-
-                <label className="field">
+                <label className="compact-field">
                   <span>Category</span>
                   <input
                     value={draft.category}
                     onChange={(event) => updateDraft('category', event.target.value)}
-                    placeholder={draft.type === 'transfer' ? 'Transfer' : 'Enter category'}
+                    placeholder={draft.type === 'transfer' ? 'Transfer' : 'Category'}
                   />
                 </label>
 
-                <label className="field">
+                <label className="compact-field">
                   <span>Amount</span>
                   <input
                     inputMode="decimal"
@@ -679,23 +742,22 @@ function App() {
                   />
                 </label>
 
-                <label className="field">
+                <label className="compact-field">
                   <span>Note</span>
                   <input
                     list="note-suggestions"
                     value={draft.note}
                     onChange={(event) => updateDraft('note', event.target.value)}
-                    placeholder="Saved note suggestions will appear here"
+                    placeholder="Note"
                   />
                 </label>
 
-                <label className="field">
+                <label className="compact-field description-field">
                   <span>Description</span>
-                  <textarea
-                    rows={3}
+                  <input
                     value={draft.description}
                     onChange={(event) => updateDraft('description', event.target.value)}
-                    placeholder="Optional details"
+                    placeholder="Optional"
                   />
                 </label>
               </div>
@@ -706,96 +768,84 @@ function App() {
                 ))}
               </datalist>
 
-              <button type="button" className="primary-button" onClick={saveTransaction}>
-                Save transaction
-              </button>
-
-              <section className="picker-panel">
-                <div className="section-header">
-                  <h3>Accounts</h3>
-                  <button type="button" className="ghost-button" onClick={() => setShowAccountForm(true)}>
+              <div className="accounts-picker-block">
+                <div className="accounts-picker-head">
+                  <span>Accounts</span>
+                  <button type="button" className="inline-action" onClick={() => openAccountEditor()}>
                     Add
                   </button>
                 </div>
-                <div className="account-grid">
-                  {data.accounts.map((account) => (
-                    <button
-                      type="button"
-                      key={account.id}
-                      className="account-tile"
-                      onClick={() => {
-                        if (draft.type === 'transfer') {
-                          setPickerField(pickerField ?? 'from')
-                        } else {
-                          updateDraft('accountId', account.id)
-                        }
-                        if (pickerField) {
-                          selectAccount(account.id)
-                        }
-                      }}
-                    >
-                      <span>{account.name}</span>
-                      <strong>{formatCurrency(accountBalances[account.id] ?? account.openingBalance)}</strong>
-                    </button>
-                  ))}
+
+                <div className="compact-account-grid">
+                  {data.accounts.map((account) => {
+                    const isSelected =
+                      (draft.type !== 'transfer' && draft.accountId === account.id) ||
+                      (draft.type === 'transfer' &&
+                        ((accountTarget === 'from' && draft.fromAccountId === account.id) ||
+                          (accountTarget === 'to' && draft.toAccountId === account.id)))
+
+                    return (
+                      <button
+                        type="button"
+                        className={isSelected ? 'compact-account-tile selected' : 'compact-account-tile'}
+                        key={account.id}
+                        onClick={() => applyAccountSelection(account.id)}
+                      >
+                        {account.name}
+                      </button>
+                    )
+                  })}
                 </div>
-              </section>
-            </section>
-          </div>
+              </div>
+
+              <button type="button" className="save-button" onClick={saveTransaction}>
+                Save
+              </button>
+            </div>
+          </section>
         )}
 
-        {pickerField && (
-          <div className="picker-backdrop" onClick={() => setPickerField(null)}>
-            <section className="picker-sheet" onClick={(event) => event.stopPropagation()}>
-              <div className="section-header">
-                <h3>{pickerTitle}</h3>
-                <button type="button" className="ghost-button" onClick={() => setPickerField(null)}>
-                  Close
-                </button>
-              </div>
-              <div className="account-grid picker-grid">
-                {data.accounts.map((account) => (
-                  <button type="button" key={account.id} className="account-tile" onClick={() => selectAccount(account.id)}>
-                    <span>{account.name}</span>
-                    <strong>{formatCurrency(accountBalances[account.id] ?? account.openingBalance)}</strong>
-                  </button>
-                ))}
-              </div>
-            </section>
-          </div>
-        )}
+        {accountEditorOpen && (
+          <section className="overlay-screen">
+            <header className="overlay-header">
+              <button type="button" className="back-button" onClick={closeAccountEditor}>
+                ←
+              </button>
+              <h2>{accountDraft.mode === 'edit' ? 'Edit Account' : 'Add Account'}</h2>
+              <div className="header-spacer" />
+            </header>
 
-        {showAccountForm && (
-          <div className="picker-backdrop" onClick={() => setShowAccountForm(false)}>
-            <section className="picker-sheet compact-sheet" onClick={(event) => event.stopPropagation()}>
-              <div className="section-header">
-                <h3>Add account</h3>
-                <button type="button" className="ghost-button" onClick={() => setShowAccountForm(false)}>
-                  Close
-                </button>
-              </div>
-              <label className="field">
+            <div className="overlay-body account-editor-body">
+              <label className="editor-field">
                 <span>Name</span>
                 <input
-                  value={newAccountName}
-                  onChange={(event) => setNewAccountName(event.target.value)}
-                  placeholder="e.g. SBI Savings"
+                  value={accountDraft.name}
+                  onChange={(event) => updateAccountDraft('name', event.target.value)}
+                  placeholder="Account name"
                 />
               </label>
-              <label className="field">
-                <span>Opening balance</span>
+
+              <label className="editor-field">
+                <span>Opening amount</span>
                 <input
                   inputMode="decimal"
-                  value={newOpeningBalance}
-                  onChange={(event) => setNewOpeningBalance(event.target.value)}
+                  value={accountDraft.openingBalance}
+                  onChange={(event) => updateAccountDraft('openingBalance', event.target.value)}
                   placeholder="0.00"
                 />
               </label>
-              <button type="button" className="primary-button" onClick={saveAccount}>
+
+              <button type="button" className="save-button" onClick={saveAccount}>
                 Save account
               </button>
-            </section>
-          </div>
+
+              {accountDraft.mode === 'edit' && (
+                <button type="button" className="delete-button" onClick={deleteAccount}>
+                  Delete account
+                </button>
+              )}
+            </div>
+          </section>
         )}
       </div>
     </div>
